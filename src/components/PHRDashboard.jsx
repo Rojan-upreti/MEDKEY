@@ -53,6 +53,7 @@ const MedKeyDashboard = () => {
   // Filter state
   const [selectedTaxonomy, setSelectedTaxonomy] = useState('');
   const [sortBy, setSortBy] = useState('relevance');
+  const [isOrganizationSearch, setIsOrganizationSearch] = useState(false);
 
   const navItems = [
     { id: 'overview', label: 'Dashboard', icon: Home, section: 'Main' },
@@ -761,6 +762,10 @@ const MedKeyDashboard = () => {
     setError(null);
     setHasResults(false);
     
+    // Check if this is an organization search
+    const hasOrganization = searchData.organizationName && searchData.organizationName.trim();
+    setIsOrganizationSearch(!!hasOrganization);
+    
     // Local variable to track if we've found any results
     let foundResults = false;
     
@@ -822,7 +827,12 @@ const MedKeyDashboard = () => {
           // Add other search criteria if provided
           if (hasFirstName) params.append('first_name', searchData.firstName.trim());
           if (hasLastName) params.append('last_name', searchData.lastName.trim());
-          if (hasOrganization) params.append('organization_name', searchData.organizationName.trim());
+          // For organization search, we'll do a broader search and filter later
+          if (hasOrganization) {
+            // Use a broader search term to catch more potential matches
+            const orgSearchTerm = searchData.organizationName.trim();
+            params.append('organization_name', orgSearchTerm);
+          }
           if (hasCity) params.append('city', searchData.city.trim());
           if (hasState) {
             const stateCode = searchData.state.trim().toUpperCase();
@@ -943,7 +953,12 @@ const MedKeyDashboard = () => {
         // Add search criteria if provided
         if (hasFirstName) params.append('first_name', searchData.firstName.trim());
         if (hasLastName) params.append('last_name', searchData.lastName.trim());
-        if (hasOrganization) params.append('organization_name', searchData.organizationName.trim());
+        // For organization search, we'll do a broader search and filter later
+        if (hasOrganization) {
+          // Use a broader search term to catch more potential matches
+          const orgSearchTerm = searchData.organizationName.trim();
+          params.append('organization_name', orgSearchTerm);
+        }
         if (hasCity) params.append('city', searchData.city.trim());
         if (hasState) {
           const stateCode = searchData.state.trim().toUpperCase();
@@ -1028,9 +1043,38 @@ const MedKeyDashboard = () => {
       }
 
       // Remove duplicates based on NPI number
-      const uniqueResults = allResults.results.filter((result, index, self) => 
+      let uniqueResults = allResults.results.filter((result, index, self) => 
         index === self.findIndex(r => r.number === result.number)
       );
+
+      // If organization name search was performed, enhance results with "Also known as" matches
+      if (hasOrganization && searchData.organizationName.trim()) {
+        const searchTerm = searchData.organizationName.trim().toLowerCase();
+        
+        // Filter results to include those that match either primary name or "Also known as" names
+        const enhancedResults = uniqueResults.filter(result => {
+          // For individual providers, check if they have any organization affiliations
+          if (result.enumeration_type === 'NPI-1') {
+            return checkOrganizationMatch(result, searchTerm);
+          }
+          
+          // For organizations, check primary name and "Also known as" names
+          if (result.enumeration_type === 'NPI-2') {
+            return checkOrganizationMatch(result, searchTerm);
+          }
+          
+          return true; // Keep other results
+        });
+        
+        if (enhancedResults.length !== uniqueResults.length) {
+          console.log(`Enhanced organization search: ${enhancedResults.length} results (was ${uniqueResults.length})`);
+          uniqueResults = enhancedResults;
+        }
+        
+        // Now search for individual providers who work at this organization
+        console.log('Searching for individual providers at the organization...');
+        await searchIndividualProvidersAtOrganization(searchTerm, uniqueResults, newAbortController);
+      }
 
       let finalResults = {
         ...allResults,
@@ -1170,6 +1214,187 @@ const MedKeyDashboard = () => {
       ...results,
       results: sortedResults
     };
+  };
+
+  // Check if organization name matches against "Also known as" names
+  const checkOrganizationMatch = (provider, searchTerm) => {
+    if (!searchTerm || !provider) return false;
+    
+    const searchLower = searchTerm.toLowerCase().trim();
+    
+    // Check primary organization name
+    if (provider.basic.organization_name) {
+      const orgName = provider.basic.organization_name.toLowerCase();
+      if (orgName.includes(searchLower) || searchLower.includes(orgName)) {
+        return true;
+      }
+    }
+    
+    // Check "Also known as" names
+    if (provider.other_names && provider.other_names.length > 0) {
+      for (const otherName of provider.other_names) {
+        const otherNameStr = otherName.organization_name || 
+                            `${otherName.first_name || ''} ${otherName.last_name || ''}`.trim();
+        
+        if (otherNameStr) {
+          const otherNameLower = otherNameStr.toLowerCase();
+          if (otherNameLower.includes(searchLower) || searchLower.includes(otherNameLower)) {
+            return true;
+          }
+        }
+      }
+    }
+    
+    return false;
+  };
+
+  // Search for individual providers who work at a specific organization
+  const searchIndividualProvidersAtOrganization = async (organizationName, existingResults, abortController) => {
+    try {
+      // Get organization names from existing results to search for individual providers
+      const organizationNames = [];
+      
+      // Add primary organization names
+      existingResults.forEach(result => {
+        if (result.enumeration_type === 'NPI-2' && result.basic.organization_name) {
+          organizationNames.push(result.basic.organization_name);
+        }
+      });
+      
+      // Add "Also known as" names
+      existingResults.forEach(result => {
+        if (result.other_names && result.other_names.length > 0) {
+          result.other_names.forEach(otherName => {
+            if (otherName.organization_name) {
+              organizationNames.push(otherName.organization_name);
+            }
+          });
+        }
+      });
+      
+      // Remove duplicates and get unique organization names
+      const uniqueOrgNames = [...new Set(organizationNames)];
+      
+      if (uniqueOrgNames.length === 0) {
+        console.log('No organization names found to search for individual providers');
+        return;
+      }
+      
+      console.log('Searching for individual providers at organizations:', uniqueOrgNames);
+      
+      // Search for individual providers at each organization
+      for (const orgName of uniqueOrgNames) {
+        // Check if search was aborted
+        if (abortController.signal.aborted) {
+          return;
+        }
+        
+        const params = new URLSearchParams({
+          version: '2.1',
+          country_code: 'US',
+          limit: '200',
+          enumeration_type: 'NPI-1' // Only individual providers
+        });
+        
+        // Add organization name to search
+        params.append('organization_name', orgName);
+        
+        // Add other search criteria if provided
+        if (searchData.city && searchData.city.trim()) {
+          params.append('city', searchData.city.trim());
+        }
+        if (searchData.state && searchData.state.trim()) {
+          params.append('state', searchData.state.trim());
+        }
+        if (searchData.postalCode && searchData.postalCode.trim()) {
+          params.append('postal_code', searchData.postalCode.trim());
+        }
+        
+        const apiUrl = `https://npiregistry.cms.hhs.gov/api/?${params.toString()}`;
+        console.log(`Searching individual providers at ${orgName}:`, apiUrl);
+        
+        // Try different CORS proxy services
+        const corsProxies = [
+          'https://api.allorigins.win/raw?url=',
+          'https://corsproxy.io/?',
+          'https://cors-proxy.htmldriven.com/?url='
+        ];
+        
+        let response;
+        let lastError;
+        
+        // Try each CORS proxy
+        for (const proxy of corsProxies) {
+          try {
+            if (abortController.signal.aborted) {
+              return;
+            }
+            
+            response = await fetch(`${proxy}${encodeURIComponent(apiUrl)}`, {
+              signal: abortController.signal
+            });
+            if (response.ok) {
+              break;
+            }
+          } catch (err) {
+            if (err.name === 'AbortError') {
+              return;
+            }
+            lastError = err;
+            continue;
+          }
+        }
+        
+        if (response && response.ok) {
+          try {
+            const data = await response.json();
+            if (data.results && data.results.length > 0) {
+              // Clean and process results
+              const cleanedResults = data.results.map(result => {
+                const cleanedAddresses = result.addresses.map(address => ({
+                  ...address,
+                  postal_code: address.postal_code ? address.postal_code.toString().replace(/\D/g, '').slice(0, 5) : address.postal_code
+                }));
+                
+                return {
+                  ...result,
+                  addresses: cleanedAddresses,
+                  searchedOrganization: orgName,
+                  isOrganizationStaff: true
+                };
+              });
+              
+              console.log(`Found ${cleanedResults.length} individual providers at ${orgName}`);
+              
+              // Add to existing results
+              existingResults.push(...cleanedResults);
+              
+              // Update the state with new results
+              const updatedResults = {
+                ...allResults,
+                results: existingResults,
+                result_count: existingResults.length
+              };
+              
+              setSearchResults(updatedResults);
+              setFilteredResults(applyFilters(updatedResults));
+              
+              // Set hasResults if we found individual providers
+              if (!foundResults && cleanedResults.length > 0) {
+                foundResults = true;
+                setHasResults(true);
+              }
+            }
+          } catch (parseError) {
+            console.error(`Error parsing response for individual providers at ${orgName}:`, parseError);
+          }
+        } else {
+          console.warn(`Failed to fetch individual providers for ${orgName}`);
+        }
+      }
+    } catch (error) {
+      console.error('Error searching for individual providers:', error);
+    }
   };
 
   // Get unique taxonomies from search results
@@ -1536,6 +1761,18 @@ const MedKeyDashboard = () => {
                 </div>
                 <div style={{fontSize: '14px', color: '#6b7280', marginBottom: '16px'}}>
                   Found {searchResults.result_count} providers
+                  {isOrganizationSearch && searchResults.results && (
+                    (() => {
+                      const orgCount = searchResults.results.filter(r => r.enumeration_type === 'NPI-2').length;
+                      const staffCount = searchResults.results.filter(r => r.isOrganizationStaff).length;
+                      return (
+                        <span>
+                          {' '}• {orgCount} organization{orgCount !== 1 ? 's' : ''}
+                          {staffCount > 0 && ` • ${staffCount} staff member${staffCount !== 1 ? 's' : ''}`}
+                        </span>
+                      );
+                    })()
+                  )}
                   {filteredResults && filteredResults.result_count !== searchResults.result_count && (
                     <span> • Showing {filteredResults.result_count} after filters</span>
                   )}
@@ -1648,6 +1885,11 @@ const MedKeyDashboard = () => {
                                   marginBottom: '4px'
                                 }}>
                                   {provider.enumeration_type === 'NPI-1' ? 'Individual Provider' : 'Organization'}
+                                  {provider.isOrganizationStaff && provider.searchedOrganization && (
+                                    <span style={{color: '#7c3aed', fontWeight: '500'}}>
+                                      {' '}• Works at {provider.searchedOrganization}
+                                    </span>
+                                  )}
                                 </div>
                                 <div style={{
                                   fontSize: '11px',
@@ -1674,6 +1916,20 @@ const MedKeyDashboard = () => {
                                     ZIP: {provider.searchedZipCode}
                                   </div>
                                 )}
+                                {provider.isOrganizationStaff && (
+                                  <div style={{
+                                    fontSize: '11px',
+                                    color: '#7c3aed',
+                                    backgroundColor: '#ede9fe',
+                                    padding: '2px 6px',
+                                    borderRadius: '4px',
+                                    display: 'inline-block',
+                                    fontWeight: '600',
+                                    marginLeft: '4px'
+                                  }}>
+                                    Staff
+                                  </div>
+                                )}
                               </div>
                               <span style={{
                                 fontSize: '11px',
@@ -1694,6 +1950,21 @@ const MedKeyDashboard = () => {
                                 fontStyle: 'italic'
                               }}>
                                 Also known as: {provider.other_names[0].organization_name || provider.other_names[0].first_name + ' ' + provider.other_names[0].last_name}
+                                {isOrganizationSearch && searchData.organizationName.trim() && 
+                                 checkOrganizationMatch(provider, searchData.organizationName.trim()) && 
+                                 !provider.basic.organization_name?.toLowerCase().includes(searchData.organizationName.trim().toLowerCase()) && (
+                                  <span style={{
+                                    fontSize: '11px',
+                                    color: '#059669',
+                                    backgroundColor: '#d1fae5',
+                                    padding: '2px 6px',
+                                    borderRadius: '4px',
+                                    marginLeft: '8px',
+                                    fontWeight: '600'
+                                  }}>
+                                    ✓ Match
+                                  </span>
+                                )}
                               </div>
                             )}
                           </div>
