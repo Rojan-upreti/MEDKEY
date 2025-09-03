@@ -1,9 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Search, 
   MapPin, 
-  Phone, 
-  ChevronRight 
+  Phone
 } from 'lucide-react';
 import LoadingAnimation from './LoadingAnimation';
 
@@ -420,7 +419,7 @@ const FindDoctor = () => {
     return Array.from(taxonomies).sort();
   };
 
-  const applyFilters = (results) => {
+  const applyFilters = useCallback((results) => {
     if (!results || !results.results) return results;
     
     let filtered = [...results.results];
@@ -444,13 +443,13 @@ const FindDoctor = () => {
       results: filtered,
       result_count: filtered.length
     };
-  };
+  }, [selectedTaxonomy, sortBy]);
 
   useEffect(() => {
     if (searchResults) {
       setFilteredResults(applyFilters(searchResults));
     }
-  }, [selectedTaxonomy, sortBy, searchResults]);
+  }, [selectedTaxonomy, sortBy, searchResults, applyFilters]);
 
   return (
     <div>
