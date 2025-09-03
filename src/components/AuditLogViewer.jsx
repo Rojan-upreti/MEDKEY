@@ -15,7 +15,7 @@ const AuditLogViewer = () => {
 
   useEffect(() => {
     loadAuditLogs();
-  }, []);
+  }, [filters]);
 
   const loadAuditLogs = async () => {
     setLoading(true);

@@ -372,6 +372,9 @@ class AuditService {
         case 'database':
           await this.cleanupDatabase(destination.config, cutoffDate);
           break;
+        default:
+          console.warn(`No cleanup method defined for destination type: ${destination.type}`);
+          break;
       }
     } catch (error) {
       console.error(`Failed to cleanup ${destination.type}:`, error);
